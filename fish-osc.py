@@ -4,6 +4,8 @@ import threading
 import argparse
 import os
 import json
+import tkinter as tk
+from tkinter import ttk, messagebox
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 from pythonosc import dispatcher
 from pythonosc import osc_server
@@ -73,7 +75,10 @@ def load_config():
         return None
 
 class SingleMotorOscillator:
-    def __init__(self, osc_ip=DEFAULT_OSC_IP, osc_port=DEFAULT_OSC_PORT):
+    def __init__(self, root, osc_ip=DEFAULT_OSC_IP, osc_port=DEFAULT_OSC_PORT):
+        self.root = root
+        self.root.title("Fish Motor OSC Controller")
+        
         # Load configuration
         config = load_config()
         
@@ -101,20 +106,105 @@ class SingleMotorOscillator:
         self.osc_ip = osc_ip
         self.osc_port = osc_port
         
+        # Setup GUI
+        self.setup_gui()
+        
         # Setup OSC server
         self.dispatcher = dispatcher.Dispatcher()
         self.setup_osc_handlers()
         
         self.osc_server = osc_server.ThreadingOSCUDPServer((osc_ip, osc_port), self.dispatcher)
-        print(f"OSC Server listening on {osc_ip}:{osc_port}")
-        print("Ready to receive OSC messages:")
-        print("  /fish/amplitude <value>")
-        print("  /fish/speed <value>")
-        print("  /fish/start")
-        print("  /fish/stop")
-        print("  /fish/status")
-        print("  /fish/save")
-        print(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
+        
+        # Start OSC server in separate thread
+        self.osc_thread = threading.Thread(target=self.osc_server.serve_forever, daemon=True)
+        self.osc_thread.start()
+        
+        self.log_message(f"OSC Server listening on {osc_ip}:{osc_port}")
+        self.log_message("Ready to receive OSC messages:")
+        self.log_message("  /fish/amplitude <value>")
+        self.log_message("  /fish/speed <value>")
+        self.log_message("  /fish/start")
+        self.log_message("  /fish/stop")
+        self.log_message("  /fish/status")
+        self.log_message("  /fish/save")
+        self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
+
+    def setup_gui(self):
+        """Setup the tkinter GUI"""
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # OSC Configuration Frame
+        osc_frame = ttk.LabelFrame(main_frame, text="OSC Configuration", padding="5")
+        osc_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        ttk.Label(osc_frame, text="Listen IP:").grid(row=0, column=0, sticky=tk.W)
+        self.osc_ip_var = tk.StringVar(value=self.osc_ip)
+        self.osc_ip_entry = ttk.Entry(osc_frame, textvariable=self.osc_ip_var, width=15)
+        self.osc_ip_entry.grid(row=0, column=1, padx=5)
+        
+        ttk.Label(osc_frame, text="Listen Port:").grid(row=0, column=2, sticky=tk.W, padx=(10,0))
+        self.osc_port_var = tk.IntVar(value=self.osc_port)
+        self.osc_port_entry = ttk.Entry(osc_frame, textvariable=self.osc_port_var, width=8)
+        self.osc_port_entry.grid(row=0, column=3, padx=5)
+        
+        # Motor Control Frame
+        motor_frame = ttk.LabelFrame(main_frame, text="Motor Control", padding="5")
+        motor_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        ttk.Label(motor_frame, text="Amplitude (degrees):").grid(row=0, column=0, sticky=tk.W)
+        self.amplitude_var = tk.DoubleVar(value=self.amplitude_deg)
+        self.amplitude_entry = ttk.Entry(motor_frame, textvariable=self.amplitude_var, width=10)
+        self.amplitude_entry.grid(row=0, column=1, padx=5)
+        
+        ttk.Label(motor_frame, text="Speed (steps/sec):").grid(row=1, column=0, sticky=tk.W)
+        self.speed_var = tk.IntVar(value=self.speed)
+        self.speed_entry = ttk.Entry(motor_frame, textvariable=self.speed_var, width=10)
+        self.speed_entry.grid(row=1, column=1, padx=5)
+        
+        # Buttons Frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        self.start_button = ttk.Button(button_frame, text="Start Oscillation", command=self.start_oscillation_gui)
+        self.start_button.grid(row=0, column=0, padx=5)
+        
+        self.stop_button = ttk.Button(button_frame, text="Stop Oscillation", command=self.stop_oscillation_gui)
+        self.stop_button.grid(row=0, column=1, padx=5)
+        
+        self.save_button = ttk.Button(button_frame, text="Save Settings", command=self.save_settings_gui)
+        self.save_button.grid(row=0, column=2, padx=5)
+        
+        self.status_button = ttk.Button(button_frame, text="Get Status", command=self.send_status_gui)
+        self.status_button.grid(row=0, column=3, padx=5)
+        
+        # Log Frame
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding="5")
+        log_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=5)
+        
+        # Create scrolled text widget
+        self.log_text = tk.Text(log_frame, height=10, width=60, wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(3, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+    def log_message(self, message):
+        """Add message to log widget"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+        self.root.update_idletasks()
 
     def setup_osc_handlers(self):
         """Setup OSC message handlers"""
@@ -136,26 +226,118 @@ class SingleMotorOscillator:
         try:
             amplitude = float(args)
             if amplitude <= 0:
-                print("Amplitude must be positive")
+                self.log_message("Amplitude must be positive")
                 return
             self.amplitude_deg = amplitude
-            print(f"Amplitude set to {amplitude} degrees")
+            self.amplitude_var.set(amplitude)  # Update GUI
+            self.log_message(f"Amplitude set to {amplitude} degrees (OSC)")
             self.update_config()
         except (ValueError, TypeError):
-            print("Invalid amplitude value")
+            self.log_message("Invalid amplitude value (OSC)")
 
     def set_speed(self, unused_addr, args):
         """OSC handler for setting speed"""
         try:
             speed = int(args)
             if speed <= 0:
-                print("Speed must be positive")
+                self.log_message("Speed must be positive")
                 return
             self.speed = speed
-            print(f"Speed set to {speed} steps/sec")
+            self.speed_var.set(speed)  # Update GUI
+            self.log_message(f"Speed set to {speed} steps/sec (OSC)")
             self.update_config()
         except (ValueError, TypeError):
-            print("Invalid speed value")
+            self.log_message("Invalid speed value (OSC)")
+
+    def start_oscillation(self, unused_addr=None, args=None):
+        """OSC handler for starting oscillation"""
+        if self.running:
+            self.log_message("Oscillation already running (OSC)")
+            return
+
+        amplitude_units = degrees_to_dxl_units(self.amplitude_deg)
+        self.set_motor_speed(self.speed)
+        self.running = True
+
+        def oscillate():
+            steps = 20
+            while self.running:
+                for direction in [1, -1]:
+                    for i in range(steps + 1):
+                        if not self.running:
+                            return
+                        sine_value = math.sin((i / steps) * math.pi)
+                        position = int(self.zero_pos + direction * amplitude_units * sine_value)
+                        self.move_to_position(position)
+                        time.sleep(1 / (self.speed * 10))
+
+        threading.Thread(target=oscillate, daemon=True).start()
+        self.log_message("Oscillation started (OSC)")
+
+    def stop_oscillation(self, unused_addr=None, args=None):
+        """OSC handler for stopping oscillation"""
+        if not self.running:
+            self.log_message("Oscillation not running (OSC)")
+            return
+            
+        self.running = False
+        self.move_to_position(self.zero_pos)
+        self.log_message("Oscillation stopped (OSC)")
+
+    def send_status(self, unused_addr=None, args=None):
+        """Print current status to console and log"""
+        status = f"Status: running={self.running}, amplitude={self.amplitude_deg}, speed={self.speed}"
+        print(status)
+        self.log_message(status)
+
+    def start_oscillation_gui(self):
+        """GUI handler for starting oscillation"""
+        try:
+            amplitude_deg = self.amplitude_var.get()
+            speed = self.speed_var.get()
+        except (ValueError, tk.TclError):
+            messagebox.showerror("Error", "Invalid amplitude or speed values")
+            return
+
+        if amplitude_deg <= 0 or speed <= 0:
+            messagebox.showerror("Error", "Amplitude and speed must be positive")
+            return
+
+        self.amplitude_deg = amplitude_deg
+        self.speed = speed
+        
+        amplitude_units = degrees_to_dxl_units(amplitude_deg)
+        self.set_motor_speed(speed)
+        self.running = True
+
+        def oscillate():
+            steps = 20
+            while self.running:
+                for direction in [1, -1]:
+                    for i in range(steps + 1):
+                        if not self.running:
+                            return
+                        sine_value = math.sin((i / steps) * math.pi)
+                        position = int(self.zero_pos + direction * amplitude_units * sine_value)
+                        self.move_to_position(position)
+                        time.sleep(1 / (speed * 10))
+
+        threading.Thread(target=oscillate, daemon=True).start()
+        self.log_message("Oscillation started (GUI)")
+
+    def stop_oscillation_gui(self):
+        """GUI handler for stopping oscillation"""
+        self.running = False
+        self.move_to_position(self.zero_pos)
+        self.log_message("Oscillation stopped (GUI)")
+
+    def save_settings_gui(self):
+        """GUI handler for saving settings"""
+        self.save_settings()
+
+    def send_status_gui(self):
+        """GUI handler for getting status"""
+        self.send_status()
 
     def update_config(self):
         """Update JSON config file with current values"""
@@ -182,9 +364,9 @@ class SingleMotorOscillator:
             # Save updated config
             with open(config_file, 'w') as f:
                 json.dump(config, f, indent=4)
-            print("Configuration updated in settings.json")
+            self.log_message("Configuration updated in settings.json")
         except Exception as e:
-            print(f"Error updating config: {e}")
+            self.log_message(f"Error updating config: {e}")
 
     def save_settings(self, unused_addr=None, args=None):
         """Manually save current settings to JSON file"""
@@ -219,66 +401,23 @@ class SingleMotorOscillator:
             with open(config_file, 'w') as f:
                 json.dump(config, f, indent=4)
             
-            print("Settings manually saved to settings.json")
-            print(f"Saved: amplitude={self.amplitude_deg}°, speed={self.speed}")
+            message = f"Settings saved to settings.json: amplitude={self.amplitude_deg}°, speed={self.speed}"
+            print(message)
+            self.log_message(message)
             
         except Exception as e:
-            print(f"Error saving settings: {e}")
-
-    def start_oscillation(self, unused_addr=None, args=None):
-        """OSC handler for starting oscillation"""
-        if self.running:
-            print("Oscillation already running")
-            return
-
-        amplitude_units = degrees_to_dxl_units(self.amplitude_deg)
-        self.set_motor_speed(self.speed)
-        self.running = True
-
-        def oscillate():
-            steps = 20
-            while self.running:
-                for direction in [1, -1]:
-                    for i in range(steps + 1):
-                        if not self.running:
-                            return
-                        sine_value = math.sin((i / steps) * math.pi)
-                        position = int(self.zero_pos + direction * amplitude_units * sine_value)
-                        self.move_to_position(position)
-                        time.sleep(1 / (self.speed * 10))
-
-        threading.Thread(target=oscillate, daemon=True).start()
-        print("Oscillation started")
-
-    def stop_oscillation(self, unused_addr=None, args=None):
-        """OSC handler for stopping oscillation"""
-        if not self.running:
-            print("Oscillation not running")
-            return
-            
-        self.running = False
-        self.move_to_position(self.zero_pos)
-        print("Oscillation stopped")
-
-    def send_status(self, unused_addr=None, args=None):
-        """Print current status to console"""
-        print(f"Status: running={self.running}, amplitude={self.amplitude_deg}, speed={self.speed}")
-
-    def run(self):
-        """Start the OSC server"""
-        try:
-            self.osc_server.serve_forever()
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-        finally:
-            self.cleanup()
+            error_msg = f"Error saving settings: {e}"
+            print(error_msg)
+            self.log_message(error_msg)
 
     def cleanup(self):
         """Clean up resources"""
         self.running = False
+        if hasattr(self, 'osc_server'):
+            self.osc_server.shutdown()
         self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
         self.port_handler.closePort()
-        print("Cleanup complete.")
+        self.log_message("Cleanup complete.")
 
 def main():
     # Load saved configuration
@@ -292,11 +431,13 @@ def main():
         default_ip = DEFAULT_OSC_IP
         default_port = DEFAULT_OSC_PORT
     
-    parser = argparse.ArgumentParser(description="Single Motor Oscillator with OSC Control")
+    parser = argparse.ArgumentParser(description="Single Motor Oscillator with OSC Control and GUI")
     parser.add_argument("--listen-ip", default=default_ip, 
                        help=f"IP address to listen for OSC messages (default: {default_ip})")
     parser.add_argument("--listen-port", type=int, default=default_port,
                        help=f"Port to listen for OSC messages (default: {default_port})")
+    parser.add_argument("--no-gui", action="store_true",
+                       help="Run without GUI (console only)")
     
     args = parser.parse_args()
     
@@ -305,11 +446,29 @@ def main():
         save_config(args.listen_ip, args.listen_port)
     
     try:
-        oscillator = SingleMotorOscillator(
-            osc_ip=args.listen_ip,
-            osc_port=args.listen_port
-        )
-        oscillator.run()
+        if args.no_gui:
+            # Console only mode
+            print("Running in console-only mode")
+            oscillator = SingleMotorOscillator(None, args.listen_ip, args.listen_port)
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down...")
+            finally:
+                oscillator.cleanup()
+        else:
+            # GUI mode
+            root = tk.Tk()
+            app = SingleMotorOscillator(root, args.listen_ip, args.listen_port)
+            
+            def on_closing():
+                app.cleanup()
+                root.destroy()
+            
+            root.protocol("WM_DELETE_WINDOW", on_closing)
+            root.mainloop()
+            
     except Exception as e:
         print(f"Error: {e}")
 
