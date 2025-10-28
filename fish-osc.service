@@ -1,8 +1,8 @@
 [Unit]
 Description=Fish Motor OSC Controller Service
 Documentation=https://github.com/JonnyCo/PeixeCidade
-After=network-online.target
-Wants=network-online.target
+After=network-online.target graphical-session.target
+Wants=network-online.target graphical-session.target
 
 [Service]
 Type=simple
@@ -12,8 +12,8 @@ WorkingDirectory=/home/pi/PeixeCidade
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 
-# Execute the startup script
-ExecStart=/home/pi/PeixeCidade/fish-osc-startup.sh
+# Wait for display to be ready, then execute startup script
+ExecStart=/bin/bash -c 'while ! pgrep -x "Xorg" > /dev/null; do sleep 1; done; exec /home/pi/PeixeCidade/fish-osc-startup.sh'
 
 # Restart configuration
 Restart=always
@@ -25,12 +25,11 @@ StartLimitBurst=3
 StandardOutput=append:/home/pi/PeixeCidade/fish-osc-service.log
 StandardError=append:/home/pi/PeixeCidade/fish-osc-error.log
 
-# Security settings
-NoNewPrivileges=true
+# Security settings (relaxed for GUI access)
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
+ProtectSystem=false
+ProtectHome=false
 ReadWritePaths=/home/pi/PeixeCidade
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

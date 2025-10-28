@@ -47,9 +47,9 @@ fi
 
 # Run fish-osc program
 log_message "Starting fish-osc.py program"
-log_message "Command: python3 $PYTHON_SCRIPT "
+log_message "Command: python3 $PYTHON_SCRIPT"
 
-# Run program and capture output
-python3 "$PYTHON_SCRIPT"  2>&1 | tee -a "$LOG_FILE"
+# Run program and capture output (GUI mode)
+python3 "$PYTHON_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
 
 log_message "fish-osc.py program exited"
