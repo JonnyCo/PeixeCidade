@@ -2,9 +2,9 @@
 
 # Fish OSC Controller Startup Script
 # This script will:
-# 1. Navigate to the PeixeCidade directory
-# 2. Git pull the latest changes
-# 3. Run the fish-osc.py program
+# 1. Navigate to PeixeCidade directory
+# 2. Git pull latest changes
+# 3. Run fish-osc.py program
 
 set -e  # Exit on any error
 
@@ -17,6 +17,24 @@ PYTHON_SCRIPT="fish-osc.py"
 log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
+
+# Wait for display to be ready
+log_message "Waiting for display to be ready..."
+MAX_WAIT=60
+WAIT_COUNT=0
+
+while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+    if [ -n "$DISPLAY" ] && xhost > /dev/null 2>&1; then
+        log_message "Display is ready"
+        break
+    fi
+    sleep 1
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+done
+
+if [ $WAIT_COUNT -eq $MAX_WAIT ]; then
+    log_message "WARNING: Display not ready after $MAX_WAIT seconds, proceeding anyway"
+fi
 
 # Navigate to repository directory
 log_message "Navigating to $REPO_DIR"

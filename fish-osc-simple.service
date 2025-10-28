@@ -1,0 +1,14 @@
+[Unit]
+Description=Fish Motor OSC Controller Service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/PeixeCidade
+ExecStart=/bin/bash -c 'export DISPLAY=:0; export XAUTHORITY=/home/pi/.Xauthority; ./fish-osc-startup.sh'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
