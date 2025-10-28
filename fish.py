@@ -5,7 +5,7 @@ import threading
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # Constants
-PORT = "/dev/tty.usbserial-FT9HDAWY"  # Update if needed
+PORT = "/dev/ttyUSB0"  # Update if needed
 BAUDRATE = 57600
 ADDR_GOAL_POSITION = 116
 ADDR_PRESENT_POSITION = 132
