@@ -76,6 +76,6 @@ echo "  Startup log:       $REPO_DIR/fish-osc-startup.log"
 echo
 echo "The service will automatically start on system boot and will:"
 echo "  1. Git pull latest changes from repository"
-echo "  2. Run fish-osc.py with --no-gui flag"
+echo "  2. Run fish-osc.py using python3"
 echo "  3. Restart automatically if it crashes"
 echo "  4. Log all output for debugging"

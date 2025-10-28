@@ -39,17 +39,17 @@ if [ ! -f "$PYTHON_SCRIPT" ]; then
     exit 1
 fi
 
-# Check if uv is available
-if ! command -v uv &> /dev/null; then
-    log_message "ERROR: uv command not found"
+# Check if python is available
+if ! command -v python3 &> /dev/null; then
+    log_message "ERROR: python3 command not found"
     exit 1
 fi
 
-# Run the fish-osc program
+# Run fish-osc program
 log_message "Starting fish-osc.py program"
-log_message "Command: uv run $PYTHON_SCRIPT --no-gui"
+log_message "Command: python3 $PYTHON_SCRIPT "
 
-# Run the program and capture output
-uv run "$PYTHON_SCRIPT" --no-gui 2>&1 | tee -a "$LOG_FILE"
+# Run program and capture output
+python3 "$PYTHON_SCRIPT"  2>&1 | tee -a "$LOG_FILE"
 
 log_message "fish-osc.py program exited"
