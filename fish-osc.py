@@ -205,7 +205,8 @@ class SingleMotorOscillator:
         self.log_message("  /fish/start")
         self.log_message("  /fish/stop")
         self.log_message("  /fish/status")
-        self.log_message("  /fish/save")
+        self.log_message("  /fish/angle <value>")
+
         self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
         
         # Auto-start oscillation if no GUI (headless mode) and not disabled
@@ -313,7 +314,8 @@ class SingleMotorOscillator:
         self.dispatcher.map("/fish/start", self.start_oscillation)
         self.dispatcher.map("/fish/stop", self.stop_oscillation)
         self.dispatcher.map("/fish/status", self.send_status)
-        self.dispatcher.map("/fish/save", self.save_settings)
+        self.dispatcher.map("/fish/angle", self.set_angle)
+
 
     def move_to_position(self, position):
         self.packet_handler.write4ByteTxRx(self.port_handler, MOTOR_ID, ADDR_GOAL_POSITION, position)
@@ -352,6 +354,26 @@ class SingleMotorOscillator:
             self.update_config()
         except (ValueError, TypeError):
             self.log_message("Invalid speed value (OSC)")
+
+    def set_angle(self, unused_addr, args):
+        """OSC handler for setting motor to specific angle"""
+        try:
+            angle = float(args)
+            if angle < 0 or angle > 360:
+                self.log_message("Angle must be between 0 and 360 degrees")
+                return
+            
+            # Stop any ongoing oscillation
+            if self.running:
+                self.running = False
+                self.log_message("Stopping oscillation to set angle")
+            
+            # Convert angle to dynamixel units and move motor
+            angle_units = degrees_to_dxl_units(angle)
+            self.move_to_position(angle_units)
+            self.log_message(f"Motor moved to {angle} degrees (OSC)")
+        except (ValueError, TypeError):
+            self.log_message("Invalid angle value (OSC)")
 
     def start_oscillation(self, unused_addr=None, args=None):
         """OSC handler for starting oscillation"""
