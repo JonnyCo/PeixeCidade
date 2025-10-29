@@ -214,7 +214,7 @@ class SingleMotorOscillator:
         self.log_message("Moving to home position...")
         home_angle_units = degrees_to_dxl_units(180)  # Home position at 180 degrees
         self.move_to_position(home_angle_units)
-        time.sleep(1 * 1000)  # 1 second
+        time.sleep(1)  # 1 second
 
         # Start oscillation
         self.log_message("Starting oscillation...")
