@@ -206,13 +206,19 @@ class SingleMotorOscillator:
         self.log_message("  /fish/stop")
         self.log_message("  /fish/status")
         self.log_message("  /fish/angle <value>")
+        self.log_message("  /fish/home")
 
         self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
         
-        # Auto-start oscillation if no GUI (headless mode) and not disabled
-        if not self.has_gui and not getattr(self, 'no_auto_start', False):
-            self.log_message("Auto-starting oscillation in headless mode...")
-            self.start_oscillation()
+        # Auto-start: move to home position and start oscillation
+        self.log_message("Moving to home position...")
+        home_angle_units = degrees_to_dxl_units(180)  # Home position at 180 degrees
+        self.move_to_position(home_angle_units)
+        time.sleep(1 * 1000)  # 1 second
+
+        # Start oscillation
+        self.log_message("Starting oscillation...")
+        self.start_oscillation()
 
     def setup_gui(self):
         """Setup the tkinter GUI"""
@@ -315,6 +321,7 @@ class SingleMotorOscillator:
         self.dispatcher.map("/fish/stop", self.stop_oscillation)
         self.dispatcher.map("/fish/status", self.send_status)
         self.dispatcher.map("/fish/angle", self.set_angle)
+        self.dispatcher.map("/fish/home", self.go_home)
 
 
     def move_to_position(self, position):
@@ -374,6 +381,18 @@ class SingleMotorOscillator:
             self.log_message(f"Motor moved to {angle} degrees (OSC)")
         except (ValueError, TypeError):
             self.log_message("Invalid angle value (OSC)")
+
+    def go_home(self, unused_addr=None, args=None):
+        """OSC handler for moving to home position (0 degrees)"""
+        # Stop any ongoing oscillation
+        if self.running:
+            self.running = False
+            self.log_message("Stopping oscillation to go home")
+        
+        # Move to home position (0 degrees)
+        home_angle_units = degrees_to_dxl_units(0)
+        self.move_to_position(home_angle_units)
+        self.log_message("Motor moved to home position (0 degrees) (OSC)")
 
     def start_oscillation(self, unused_addr=None, args=None):
         """OSC handler for starting oscillation"""
