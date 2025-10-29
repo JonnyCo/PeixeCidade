@@ -4,6 +4,9 @@ import threading
 import argparse
 import os
 import json
+import socket
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
@@ -27,11 +30,80 @@ HOME_DEGREES = 180
 DEFAULT_OSC_IP = "127.0.0.1"
 DEFAULT_OSC_PORT = 8000
 
+def is_display_connected():
+    """Check if a display is connected and available at runtime"""
+    # Method 1: Check DISPLAY environment variable
+    display = os.environ.get('DISPLAY')
+    if not display:
+        print("No DISPLAY environment variable found")
+        return False
+    
+    print(f"DISPLAY environment variable: {display}")
+    
+    # Method 2: Try to connect to X11 display using xset
+    try:
+        result = subprocess.run(['xset', 'q'], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            print("X11 display is accessible via xset")
+            return True
+        else:
+            print("X11 display not accessible via xset")
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+        print("xset command failed or not available")
+    
+    # Method 3: Try to initialize tkinter (most reliable test)
+    try:
+        test_root = tk.Tk()
+        test_root.withdraw()  # Hide the window immediately
+        test_root.destroy()
+        print("Tkinter display test successful")
+        return True
+    except tk.TclError as e:
+        print(f"Tkinter display test failed: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error during tkinter test: {e}")
+        return False
+
 def degrees_to_dxl_units(degrees):
     return int((degrees / 360.0) * 4095)
 
 def dxl_units_to_degrees(units):
     return (units / 4095.0) * 360
+
+def get_local_ips():
+    """Get all local IP addresses"""
+    ips = []
+    
+    # Get hostname IPs
+    try:
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        ips.append(f"{hostname}: {local_ip}")
+    except:
+        pass
+    
+    # Get all network interfaces
+    try:
+        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+        if result.returncode == 0:
+            interface_ips = result.stdout.strip().split()
+            for i, ip in enumerate(interface_ips):
+                ips.append(f"Interface {i+1}: {ip}")
+    except:
+        pass
+    
+    # Fallback to common method
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        ips.append(f"Primary: {local_ip}")
+    except:
+        ips.append("Unable to detect IP")
+    
+    return ips
 
 def save_config(listen_ip, listen_port):
     """Save OSC configuration to JSON file"""
@@ -77,7 +149,10 @@ def load_config():
 class SingleMotorOscillator:
     def __init__(self, root, osc_ip=DEFAULT_OSC_IP, osc_port=DEFAULT_OSC_PORT):
         self.root = root
-        self.root.title("Fish Motor OSC Controller")
+        self.has_gui = root is not None
+        
+        if self.has_gui:
+            self.root.title("Fish Motor OSC Controller")
         
         # Load configuration
         config = load_config()
@@ -106,8 +181,12 @@ class SingleMotorOscillator:
         self.osc_ip = osc_ip
         self.osc_port = osc_port
         
-        # Setup GUI
-        self.setup_gui()
+        # Store auto-start preference
+        self.no_auto_start = False
+        
+        # Setup GUI only if available
+        if self.has_gui:
+            self.setup_gui()
         
         # Setup OSC server
         self.dispatcher = dispatcher.Dispatcher()
@@ -128,6 +207,11 @@ class SingleMotorOscillator:
         self.log_message("  /fish/status")
         self.log_message("  /fish/save")
         self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
+        
+        # Auto-start oscillation if no GUI (headless mode) and not disabled
+        if not self.has_gui and not getattr(self, 'no_auto_start', False):
+            self.log_message("Auto-starting oscillation in headless mode...")
+            self.start_oscillation()
 
     def setup_gui(self):
         """Setup the tkinter GUI"""
@@ -149,6 +233,15 @@ class SingleMotorOscillator:
         self.osc_port_entry = ttk.Entry(osc_frame, textvariable=self.osc_port_var, width=8)
         self.osc_port_entry.grid(row=0, column=3, padx=5)
         
+        # IP Addresses Display
+        ip_frame = ttk.LabelFrame(main_frame, text="Local IP Addresses", padding="5")
+        ip_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        # Get and display IPs
+        local_ips = get_local_ips()
+        for i, ip_info in enumerate(local_ips):
+            ttk.Label(ip_frame, text=ip_info, font=("Courier", 9)).grid(row=i, column=0, sticky=tk.W, pady=1)
+        
         # Motor Control Frame
         motor_frame = ttk.LabelFrame(main_frame, text="Motor Control", padding="5")
         motor_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
@@ -165,7 +258,7 @@ class SingleMotorOscillator:
         
         # Buttons Frame
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=10)
         
         self.start_button = ttk.Button(button_frame, text="Start Oscillation", command=self.start_oscillation_gui)
         self.start_button.grid(row=0, column=0, padx=5)
@@ -195,16 +288,23 @@ class SingleMotorOscillator:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)
+        main_frame.rowconfigure(5, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
     def log_message(self, message):
-        """Add message to log widget"""
+        """Add message to log widget or console"""
         timestamp = time.strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
+        formatted_message = f"[{timestamp}] {message}"
+        
+        if self.has_gui and hasattr(self, 'log_text'):
+            # GUI mode - add to log widget
+            self.log_text.insert(tk.END, f"{formatted_message}\n")
+            self.log_text.see(tk.END)
+            self.root.update_idletasks()
+        
+        # Always log to console (useful for service logs)
+        print(formatted_message)
 
     def setup_osc_handlers(self):
         """Setup OSC message handlers"""
@@ -229,7 +329,9 @@ class SingleMotorOscillator:
                 self.log_message("Amplitude must be positive")
                 return
             self.amplitude_deg = amplitude
-            self.amplitude_var.set(amplitude)  # Update GUI
+            # Update GUI only if available
+            if self.has_gui and hasattr(self, 'amplitude_var'):
+                self.amplitude_var.set(amplitude)
             self.log_message(f"Amplitude set to {amplitude} degrees (OSC)")
             self.update_config()
         except (ValueError, TypeError):
@@ -243,7 +345,9 @@ class SingleMotorOscillator:
                 self.log_message("Speed must be positive")
                 return
             self.speed = speed
-            self.speed_var.set(speed)  # Update GUI
+            # Update GUI only if available
+            if self.has_gui and hasattr(self, 'speed_var'):
+                self.speed_var.set(speed)
             self.log_message(f"Speed set to {speed} steps/sec (OSC)")
             self.update_config()
         except (ValueError, TypeError):
@@ -437,7 +541,11 @@ def main():
     parser.add_argument("--listen-port", type=int, default=default_port,
                        help=f"Port to listen for OSC messages (default: {default_port})")
     parser.add_argument("--no-gui", action="store_true",
-                       help="Run without GUI (console only)")
+                       help="Force run without GUI (console only)")
+    parser.add_argument("--force-gui", action="store_true",
+                       help="Force run with GUI (even if no display detected)")
+    parser.add_argument("--no-auto-start", action="store_true",
+                       help="Disable auto-start of oscillation in headless mode")
     
     args = parser.parse_args()
     
@@ -445,19 +553,26 @@ def main():
     if not saved_config or args.listen_ip != saved_config.get("osc", {}).get("listen_ip") or args.listen_port != saved_config.get("osc", {}).get("listen_port"):
         save_config(args.listen_ip, args.listen_port)
     
+    # Determine whether to use GUI mode
+    use_gui = False
+    if args.force_gui:
+        use_gui = True
+        print("GUI mode forced by --force-gui argument")
+    elif args.no_gui:
+        use_gui = False
+        print("Console mode forced by --no-gui argument")
+    else:
+        # Automatic display detection
+        print("Checking for display availability...")
+        use_gui = is_display_connected()
+    
+    if use_gui:
+        print("Starting in GUI mode")
+    else:
+        print("Starting in headless/console mode")
+    
     try:
-        if args.no_gui:
-            # Console only mode
-            print("Running in console-only mode")
-            oscillator = SingleMotorOscillator(None, args.listen_ip, args.listen_port)
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                print("\nShutting down...")
-            finally:
-                oscillator.cleanup()
-        else:
+        if use_gui:
             # GUI mode
             root = tk.Tk()
             app = SingleMotorOscillator(root, args.listen_ip, args.listen_port)
@@ -468,9 +583,29 @@ def main():
             
             root.protocol("WM_DELETE_WINDOW", on_closing)
             root.mainloop()
+        else:
+            # Console only mode
+            oscillator = SingleMotorOscillator(None, args.listen_ip, args.listen_port)
+            
+            # Set auto-start preference
+            oscillator.no_auto_start = args.no_auto_start
+            
+            # Auto-start if not disabled
+            if not args.no_auto_start:
+                oscillator.log_message("Auto-starting oscillation in headless mode...")
+                oscillator.start_oscillation()
+            
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down...")
+            finally:
+                oscillator.cleanup()
             
     except Exception as e:
         print(f"Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

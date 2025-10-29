@@ -45,11 +45,12 @@ cd "$REPO_DIR" || {
 
 # Git pull latest changes
 log_message "Pulling latest changes from repository"
-if git pull origin main; then
-    log_message "Git pull successful"
-else
-    log_message "WARNING: Git pull failed, continuing with existing code"
+set +e  # Temporarily disable exit-on-error
+git pull origin main
+if [ $? -ne 0 ]; then
+    log_message "Git pull failed, continuing with existing code"
 fi
+set -e  # Re-enable exit-on-error
 
 # Check if Python script exists
 if [ ! -f "$PYTHON_SCRIPT" ]; then
@@ -66,8 +67,9 @@ fi
 # Run fish-osc program
 log_message "Starting fish-osc.py program"
 log_message "Command: python3 $PYTHON_SCRIPT"
+log_message "Display environment: $DISPLAY"
 
-# Run program and capture output (GUI mode)
+# Run program and capture output (automatic GUI/headless mode)
 python3 "$PYTHON_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
 
 log_message "fish-osc.py program exited"
