@@ -192,8 +192,20 @@ class SingleMotorOscillator:
         # Setup GUI only if available
         if self.has_gui:
             self.setup_gui()
+
+        self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
         
-        # Try to setup OSC server
+        # Auto-start: move to home position and start oscillation FIRST
+        self.log_message("Moving to home position...")
+        home_angle_units = degrees_to_dxl_units(180)  # Home position at 180 degrees
+        self.move_to_position(home_angle_units)
+        time.sleep(1)  # 1 second
+
+        # Start oscillation BEFORE attempting OSC setup
+        self.log_message("Starting oscillation...")
+        self.start_oscillation()
+        
+        # Now try to setup OSC server (after motor is already oscillating)
         try:
             self.dispatcher = dispatcher.Dispatcher()
             self.setup_osc_handlers()
@@ -216,23 +228,11 @@ class SingleMotorOscillator:
             self.log_message("  /fish/home")
             self.log_message("  /fish/shutdown")
             
-        except Exception as e:
+        except (OSError, socket.gaierror, socket.error, Exception) as e:
             self.log_message(f"Warning: Could not start OSC server on {osc_ip}:{osc_port}")
             self.log_message(f"OSC Error: {e}")
             self.log_message("Continuing with motor oscillation only...")
             self.log_message("Motor control will work, but remote control via OSC is unavailable")
-
-        self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
-        
-        # Auto-start: move to home position and start oscillation
-        self.log_message("Moving to home position...")
-        home_angle_units = degrees_to_dxl_units(180)  # Home position at 180 degrees
-        self.move_to_position(home_angle_units)
-        time.sleep(1)  # 1 second
-
-        # Start oscillation
-        self.log_message("Starting oscillation...")
-        self.start_oscillation()
 
     def setup_gui(self):
         """Setup the tkinter GUI"""
