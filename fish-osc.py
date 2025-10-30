@@ -7,6 +7,7 @@ import json
 import socket
 import subprocess
 import sys
+import signal
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
@@ -184,29 +185,42 @@ class SingleMotorOscillator:
         # Store auto-start preference
         self.no_auto_start = False
         
+        # Initialize OSC availability flag
+        self.osc_available = False
+        self.osc_server = None
+        
         # Setup GUI only if available
         if self.has_gui:
             self.setup_gui()
         
-        # Setup OSC server
-        self.dispatcher = dispatcher.Dispatcher()
-        self.setup_osc_handlers()
-        
-        self.osc_server = osc_server.ThreadingOSCUDPServer((osc_ip, osc_port), self.dispatcher)
-        
-        # Start OSC server in separate thread
-        self.osc_thread = threading.Thread(target=self.osc_server.serve_forever, daemon=True)
-        self.osc_thread.start()
-        
-        self.log_message(f"OSC Server listening on {osc_ip}:{osc_port}")
-        self.log_message("Ready to receive OSC messages:")
-        self.log_message("  /fish/amplitude <value>")
-        self.log_message("  /fish/speed <value>")
-        self.log_message("  /fish/start")
-        self.log_message("  /fish/stop")
-        self.log_message("  /fish/status")
-        self.log_message("  /fish/angle <value>")
-        self.log_message("  /fish/home")
+        # Try to setup OSC server
+        try:
+            self.dispatcher = dispatcher.Dispatcher()
+            self.setup_osc_handlers()
+            
+            self.osc_server = osc_server.ThreadingOSCUDPServer((osc_ip, osc_port), self.dispatcher)
+            
+            # Start OSC server in separate thread
+            self.osc_thread = threading.Thread(target=self.osc_server.serve_forever, daemon=True)
+            self.osc_thread.start()
+            
+            self.osc_available = True
+            self.log_message(f"OSC Server listening on {osc_ip}:{osc_port}")
+            self.log_message("Ready to receive OSC messages:")
+            self.log_message("  /fish/amplitude <value>")
+            self.log_message("  /fish/speed <value>")
+            self.log_message("  /fish/start")
+            self.log_message("  /fish/stop")
+            self.log_message("  /fish/status")
+            self.log_message("  /fish/angle <value>")
+            self.log_message("  /fish/home")
+            self.log_message("  /fish/shutdown")
+            
+        except Exception as e:
+            self.log_message(f"Warning: Could not start OSC server on {osc_ip}:{osc_port}")
+            self.log_message(f"OSC Error: {e}")
+            self.log_message("Continuing with motor oscillation only...")
+            self.log_message("Motor control will work, but remote control via OSC is unavailable")
 
         self.log_message(f"Current settings: amplitude={self.amplitude_deg}°, speed={self.speed}")
         
@@ -322,6 +336,7 @@ class SingleMotorOscillator:
         self.dispatcher.map("/fish/status", self.send_status)
         self.dispatcher.map("/fish/angle", self.set_angle)
         self.dispatcher.map("/fish/home", self.go_home)
+        self.dispatcher.map("/fish/shutdown", self.shutdown_system)
 
 
     def move_to_position(self, position):
@@ -393,6 +408,37 @@ class SingleMotorOscillator:
         home_angle_units = degrees_to_dxl_units(0)
         self.move_to_position(home_angle_units)
         self.log_message("Motor moved to home position (0 degrees) (OSC)")
+
+    def shutdown_system(self, unused_addr=None, args=None):
+        """OSC handler for shutting down the Raspberry Pi"""
+        self.log_message("Shutdown command received (OSC)")
+        self.log_message("Stopping oscillation and cleaning up...")
+        
+        # Stop oscillation
+        self.running = False
+        
+        # Move motor to home position
+        self.move_to_position(self.zero_pos)
+        
+        # Disable motor torque
+        self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+        
+        # Close port
+        self.port_handler.closePort()
+        
+        # Shutdown OSC server
+        if self.osc_available and hasattr(self, 'osc_server') and self.osc_server is not None:
+            self.osc_server.shutdown()
+        
+        self.log_message("System shutting down in 3 seconds...")
+        
+        # Schedule system shutdown in a separate thread to avoid blocking
+        def delayed_shutdown():
+            time.sleep(3)
+            self.log_message("Executing system shutdown now...")
+            os.system("sudo shutdown -h now")
+        
+        threading.Thread(target=delayed_shutdown, daemon=True).start()
 
     def start_oscillation(self, unused_addr=None, args=None):
         """OSC handler for starting oscillation"""
@@ -493,11 +539,12 @@ class SingleMotorOscillator:
             if not config:
                 config = {}
             
-            # Update OSC settings
-            if "osc" not in config:
-                config["osc"] = {}
-            config["osc"]["listen_ip"] = self.osc_ip
-            config["osc"]["listen_port"] = self.osc_port
+            # Update OSC settings only if OSC is available
+            if self.osc_available:
+                if "osc" not in config:
+                    config["osc"] = {}
+                config["osc"]["listen_ip"] = self.osc_ip
+                config["osc"]["listen_port"] = self.osc_port
             
             # Update default values
             if "default_values" not in config:
@@ -531,8 +578,11 @@ class SingleMotorOscillator:
                 config["default_values"] = {}
             
             # Update all current settings
-            config["osc"]["listen_ip"] = self.osc_ip
-            config["osc"]["listen_port"] = self.osc_port
+            if self.osc_available:
+                if "osc" not in config:
+                    config["osc"] = {}
+                config["osc"]["listen_ip"] = self.osc_ip
+                config["osc"]["listen_port"] = self.osc_port
             
             config["motor"]["port"] = PORT
             config["motor"]["baudrate"] = BAUDRATE
@@ -558,7 +608,7 @@ class SingleMotorOscillator:
     def cleanup(self):
         """Clean up resources"""
         self.running = False
-        if hasattr(self, 'osc_server'):
+        if self.osc_available and hasattr(self, 'osc_server') and self.osc_server is not None:
             self.osc_server.shutdown()
         self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
         self.port_handler.closePort()
