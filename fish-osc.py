@@ -5,7 +5,6 @@ import argparse
 import os
 import json
 import socket
-import subprocess
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -75,7 +74,6 @@ def speed_deg_per_sec(elapsed: float, period_sec: float, vmin: float, vmax: floa
     return vmin + (vmax - vmin) * 0.5 * (1.0 - math.cos(phi))
 
 def is_display_connected():
-    # Tk test is the most reliable
     try:
         if not os.environ.get("DISPLAY"):
             return False
@@ -108,7 +106,6 @@ def save_config(listen_ip, listen_port, motion_dict):
         json.dump(cfg, f, indent=4)
 
 def merge_motion_defaults(existing):
-    """Merge any existing motion dict with DEFAULTS_MOTION (non-destructive)."""
     m = dict(DEFAULTS_MOTION)
     if existing:
         for k, v in existing.items():
@@ -126,9 +123,8 @@ class SingleMotorOscillator:
 
         cfg = load_config() or {}
         osc_cfg = cfg.get("osc", {})
-        # If CLI provided, honor those; otherwise fall back to saved or defaults.
-        self.osc_ip = osc_ip or osc_cfg.get("listen_ip", DEFAULT_OSC_IP)
-        self.osc_port = osc_port or osc_cfg.get("listen_port", DEFAULT_OSC_PORT)
+        self.osc_ip = osc_ip if osc_ip is not None else osc_cfg.get("listen_ip", DEFAULT_OSC_IP)
+        self.osc_port = int(osc_port if osc_port is not None else osc_cfg.get("listen_port", DEFAULT_OSC_PORT))
 
         motion_cfg = merge_motion_defaults(cfg.get("motion"))
         self.amplitude_deg  = float(motion_cfg["amplitude_deg"])
@@ -140,7 +136,7 @@ class SingleMotorOscillator:
         self.sleep_at_center = bool(motion_cfg["sleep_at_center"])
         self.disable_torque_during_sleep = bool(motion_cfg["disable_torque_during_sleep"])
 
-        # Persist normalized config (ensures settings.json has all keys)
+        # Persist normalized config
         save_config(self.osc_ip, self.osc_port, {
             "amplitude_deg": self.amplitude_deg,
             "min_speed_dps": self.min_speed_dps,
@@ -160,16 +156,13 @@ class SingleMotorOscillator:
         if not self.port_handler.setBaudRate(BAUDRATE):
             raise RuntimeError(f"Failed to set baudrate {BAUDRATE}")
 
-        # Enable torque and set caps
         self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
         self._assert_motion_caps()
 
-        # Home
         self.zero_pos = degrees_to_dxl_units(HOME_DEGREES)
         self._goto_units(self.zero_pos)
         time.sleep(0.2)
 
-        # State
         self.running = False
         self._stop_evt = threading.Event()
         self._thread = None
@@ -179,20 +172,14 @@ class SingleMotorOscillator:
             self._setup_gui()
 
         # OSC
-        self.dispatcher = osc_dispatcher.Dispatcher()
-        self._setup_osc_handlers()
-        try:
-            self.osc_server = osc_server.ThreadingOSCUDPServer((self.osc_ip, self.osc_port), self.dispatcher)
-            threading.Thread(target=self.osc_server.serve_forever, daemon=True).start()
-            self._log(f"[OSC] Listening on {self.osc_ip}:{self.osc_port}")
-        except Exception as e:
-            self.osc_server = None
-            self._log(f"[OSC] Failed to bind: {e}")
+        self.dispatcher = None
+        self.osc_server = None
+        self._start_osc_server(self.osc_ip, self.osc_port)
 
         self._log(f"Ready. amp={self.amplitude_deg}°, min={self.min_speed_dps}°/s, "
                   f"max={self.max_speed_dps}°/s, T={self.period_sec}s, loop={self.loop_hz}Hz, "
                   f"sleep={self.sleep_after_s}s, center={self.sleep_at_center}, "
-                  f"cut_torque={self.disable_torque_during_sleep}")
+                  f"cut_torque={self.disable_torque_during_sleep}, OSC={self.osc_ip}:{self.osc_port}")
 
         # AUTOSTART: schedule after UI/OSC are live
         if self.auto_start and not self.running:
@@ -206,7 +193,6 @@ class SingleMotorOscillator:
         self.packet_handler.write4ByteTxRx(self.port_handler, MOTOR_ID, ADDR_GOAL_POSITION, clamp_0_4095(units))
 
     def _assert_motion_caps(self):
-        # Some servos need these re-asserted after torque re-enable
         try:
             self.packet_handler.write4ByteTxRx(self.port_handler, MOTOR_ID, ADDR_VELOCITY_LIMIT, VEL_LIMIT_UNITS)
             self.packet_handler.write4ByteTxRx(self.port_handler, MOTOR_ID, ADDR_PROFILE_VELOCITY, PROF_VEL_UNITS)
@@ -221,11 +207,23 @@ class SingleMotorOscillator:
         frame = ttk.Frame(root, padding=10)
         frame.grid(row=0, column=0, sticky="nsew")
 
-        r = 0
+        # OSC controls (listen IP/port + apply)
+        osc_frame = ttk.LabelFrame(frame, text="OSC Settings", padding=8)
+        osc_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0,8))
+        ttk.Label(osc_frame, text="Listen IP:").grid(row=0, column=0, sticky="w")
+        self.var_osc_ip = tk.StringVar(value=self.osc_ip)
+        ttk.Entry(osc_frame, textvariable=self.var_osc_ip, width=14).grid(row=0, column=1, padx=6)
+        ttk.Label(osc_frame, text="Listen Port:").grid(row=0, column=2, sticky="w")
+        self.var_osc_port = tk.IntVar(value=self.osc_port)
+        ttk.Entry(osc_frame, textvariable=self.var_osc_port, width=8).grid(row=0, column=3, padx=6)
+        ttk.Button(osc_frame, text="Apply OSC", command=self.apply_osc_settings).grid(row=0, column=4, padx=6)
+
+        # Motion controls
+        r = 1
         def row(label, var):
             nonlocal r
             ttk.Label(frame, text=label).grid(row=r, column=0, sticky="w")
-            e = ttk.Entry(frame, textvariable=var, width=10)
+            e = ttk.Entry(frame, textvariable=var, width=12)
             e.grid(row=r, column=1, sticky="w"); r += 1
             return e
 
@@ -254,7 +252,7 @@ class SingleMotorOscillator:
         ttk.Button(btns, text="Home",  command=self.go_home_gui).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Save",  command=self.save_settings_gui).grid(row=0, column=3, padx=4)
 
-        self.log_text = tk.Text(frame, height=10, width=68)
+        self.log_text = tk.Text(frame, height=12, width=74)
         self.log_text.grid(row=r, column=0, columnspan=2, sticky="nsew")
 
         root.columnconfigure(0, weight=1)
@@ -270,7 +268,7 @@ class SingleMotorOscillator:
             self.log_text.see(tk.END)
             self.root.update_idletasks()
 
-    # ------------------------- OSC -------------------------
+    # ----------------- OSC server lifecycle -----------------
     def _setup_osc_handlers(self):
         d = self.dispatcher
         d.map("/fish/start",  self.start_oscillation)
@@ -290,7 +288,47 @@ class SingleMotorOscillator:
         d.map("/fish/disable_torque_during_sleep", self.osc_set_disable_torque)
         d.map("/fish/save", self.osc_save)
 
-    # ---- OSC setters (engineering units) ----
+    def _start_osc_server(self, ip, port):
+        # Shutdown any existing server
+        self._stop_osc_server()
+
+        # Fresh dispatcher
+        self.dispatcher = osc_dispatcher.Dispatcher()
+        self._setup_osc_handlers()
+
+        try:
+            self.osc_server = osc_server.ThreadingOSCUDPServer((ip, int(port)), self.dispatcher)
+            threading.Thread(target=self.osc_server.serve_forever, daemon=True).start()
+            self._log(f"[OSC] Listening on {ip}:{port}")
+        except Exception as e:
+            self.osc_server = None
+            self._log(f"[OSC] Failed to bind {ip}:{port} — {e}")
+
+    def _stop_osc_server(self):
+        if self.osc_server:
+            try:
+                self.osc_server.shutdown()
+            except Exception:
+                pass
+            self.osc_server = None
+
+    # GUI action: apply new OSC IP/Port
+    def apply_osc_settings(self):
+        try:
+            new_ip = self.var_osc_ip.get().strip()
+            new_port = int(self.var_osc_port.get())
+            if not new_ip:
+                raise ValueError("IP empty")
+            self.osc_ip, self.osc_port = new_ip, new_port
+            # Persist with current motion
+            self.save_settings()
+            # Restart OSC server
+            self._start_osc_server(self.osc_ip, self.osc_port)
+            messagebox.showinfo("OSC", f"OSC server now on {self.osc_ip}:{self.osc_port}")
+        except Exception as e:
+            messagebox.showerror("OSC", f"Failed to apply OSC settings: {e}")
+
+    # ------------------- OSC setters -------------------
     def osc_set_amplitude(self, addr, value):
         try: self.amplitude_deg = max(0.1, float(value)); self._log(f"Amplitude={self.amplitude_deg} deg")
         except: self._log("Invalid amplitude")
@@ -332,7 +370,6 @@ class SingleMotorOscillator:
         center_units = degrees_to_dxl_units(HOME_DEGREES)
 
         while not self._stop_evt.is_set():
-            # New sweep period from slow speed
             loop_dt = 1.0 / max(self.loop_hz, 1.0)
             phase = 0.0
             period_start = time.monotonic()
@@ -352,13 +389,11 @@ class SingleMotorOscillator:
                 goal_units = clamp_0_4095(degrees_to_dxl_units(theta_deg))
                 self._goto_units(goal_units)
 
-                # hold loop rate
                 after = time.monotonic()
                 remain = loop_dt - (after - now)
                 if remain > 0:
                     time.sleep(remain)
 
-            # End of one full sweep
             if self._stop_evt.is_set():
                 break
 
@@ -374,7 +409,6 @@ class SingleMotorOscillator:
                 time.sleep(self.sleep_after_s)
 
                 if self.disable_torque_during_sleep:
-                    # Re-enable and re-assert caps; nudge center to “wake”
                     self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
                     time.sleep(0.05)
                     self._assert_motion_caps()
@@ -382,18 +416,16 @@ class SingleMotorOscillator:
                         self._goto_units(center_units)
                         time.sleep(0.2)
 
-                # Restart sweep fresh (reset phase + period_start)
+                # Restart sweep fresh
                 phase = 0.0
                 period_start = time.monotonic()
 
-        # On stop, recenter
         self._goto_units(degrees_to_dxl_units(HOME_DEGREES))
 
     def start_oscillation(self, *args):
         if self.running:
             self._log("Already running")
             return
-        # Ensure torque is on before starting (in case it was disabled)
         try:
             self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
         except Exception:
@@ -418,7 +450,8 @@ class SingleMotorOscillator:
     def send_status(self, *args):
         msg = (f"running={self.running}, amp={self.amplitude_deg}°, "
                f"min={self.min_speed_dps}°/s, max={self.max_speed_dps}°/s, "
-               f"T={self.period_sec}s, loop={self.loop_hz}Hz, sleep={self.sleep_after_s}s")
+               f"T={self.period_sec}s, loop={self.loop_hz}Hz, sleep={self.sleep_after_s}s, "
+               f"OSC={self.osc_ip}:{self.osc_port}")
         self._log(msg)
 
     def set_angle(self, addr, value):
@@ -440,8 +473,7 @@ class SingleMotorOscillator:
         self.stop_oscillation()
         self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
         self.port_handler.closePort()
-        if self.osc_server:
-            self.osc_server.shutdown()
+        self._stop_osc_server()
         os.system("sudo shutdown -h now")
 
     # ------------------- GUI wrappers -------------------
@@ -489,8 +521,7 @@ class SingleMotorOscillator:
     # ------------------- Cleanup -------------------
     def cleanup(self):
         self.stop_oscillation()
-        if self.osc_server:
-            self.osc_server.shutdown()
+        self._stop_osc_server()
         self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
         self.port_handler.closePort()
         self._log("Cleanup complete.")
@@ -501,9 +532,9 @@ def main():
     saved = load_config() or {}
     osc_saved = saved.get("osc", {})
     default_ip = osc_saved.get("listen_ip", DEFAULT_OSC_IP)
-    default_port = osc_saved.get("listen_port", DEFAULT_OSC_PORT)
+    default_port = int(osc_saved.get("listen_port", DEFAULT_OSC_PORT))
 
-    parser = argparse.ArgumentParser(description="Single Motor Oscillator (deg/sec) with OSC + optional GUI")
+    parser = argparse.ArgumentParser(description="Single Motor Oscillator (deg/sec) with OSC + GUI")
     parser.add_argument("--listen-ip", default=default_ip, help="OSC listen IP")
     parser.add_argument("--listen-port", type=int, default=default_port, help="OSC listen port")
     parser.add_argument("--no-gui", action="store_true", help="Force headless mode")
@@ -512,18 +543,11 @@ def main():
     parser.add_argument("--no-auto-start", action="store_true", help="Do not autostart oscillation")
     args = parser.parse_args()
 
-    # Autostart policy (default True unless explicitly disabled)
     auto_start = True
     if args.no_auto_start:
         auto_start = False
     elif args.auto_start:
         auto_start = True
-
-    # Persist OSC endpoints if changed
-    if (args.listen_ip != default_ip) or (args.listen_port != default_port):
-        # keep current (or default) motion, update osc endpoints
-        motion = merge_motion_defaults((saved or {}).get("motion"))
-        save_config(args.listen_ip, args.listen_port, motion)
 
     # Decide GUI
     use_gui = False
