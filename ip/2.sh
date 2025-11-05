@@ -1,7 +1,11 @@
 #!/bin/bash
-#
-sudo nmcli con mod "Wired connection 1" ipv4.addresses 10.1.91.102/24
-sudo nmcli con mod "Wired connection 1" ipv4.gateway 10.1.91.1
-sudo nmcli con mod "Wired connection 1" ipv4.dns "10.1.91.1 8.8.8.8"
-sudo nmcli con mod "Wired connection 1" ipv4.method manual
-sudo nmcli con up "Wired connection 1"
+CON_NAME="NF_VCAM"
+IP="10.1.91.102/24"
+GW="10.1.91.1"
+DNS="10.1.91.1 8.8.8.8"
+
+sudo nmcli con mod "$CON_NAME" ipv4.addresses "$IP"
+sudo nmcli con mod "$CON_NAME" ipv4.gateway "$GW"
+sudo nmcli con mod "$CON_NAME" ipv4.dns "$DNS"
+sudo nmcli con mod "$CON_NAME" ipv4.method manual
+sudo nmcli con up "$CON_NAME"
