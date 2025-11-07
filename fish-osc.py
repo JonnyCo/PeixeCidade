@@ -467,11 +467,24 @@ class SingleMotorOscillator:
     def set_angle(self, addr, value):
         try:
             ang = float(value)
+            # Stop oscillation (now disables torque)
             self.stop_oscillation()
+            # Re-enable torque so the motor can move/hold the new angle
+            try:
+                self.packet_handler.write1ByteTxRx(
+                    self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
+                )
+                time.sleep(0.02)  # small settle
+            except Exception as e:
+                self._log(f"Failed to re-enable torque: {e}")
+    
+            # Command the new angle
             self._goto_units(degrees_to_dxl_units(ang))
             self._log(f"Angle set to {ang}°")
+    
         except Exception:
             self._log("Invalid angle")
+
 
     def go_home(self, *args):
         self.stop_oscillation()
