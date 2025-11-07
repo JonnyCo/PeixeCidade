@@ -439,12 +439,22 @@ class SingleMotorOscillator:
     def stop_oscillation(self, *args):
         if not self.running:
             self._log("Not running")
-            return
-        self._stop_evt.set()
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        self.running = False
-        self._log("Oscillation stopped")
+        else:
+            self._stop_evt.set()
+            if self._thread:
+                self._thread.join(timeout=2.0)
+            self.running = False
+            self._log("Oscillation stopped")
+
+        # Always disable torque when stopping — whether running or not
+        try:
+            self.packet_handler.write1ByteTxRx(
+                self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            )
+            self._log("Torque disabled")
+        except Exception as e:
+            self._log(f"Failed to disable torque: {e}")
+
 
     # ------------------- Utility handlers -------------------
     def send_status(self, *args):
