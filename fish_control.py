@@ -1,6 +1,6 @@
 import tkinter as tk
 from pythonosc.udp_client import SimpleUDPClient
-import time, json, os, math
+import time, json, os
 
 # ------------- NETWORK CONFIG -------------
 FISH_LIST = [
@@ -13,16 +13,15 @@ NUM_FISH = 3
 HOME_DEG = 180.0
 
 # ------------- STREAMING CONFIG -------------
-STREAM_HZ = 50.0                       # play out at 50Hz
+STREAM_HZ = 5.0                       # play out at 25 Hz
 FRAME_MS = int(1000.0 / STREAM_HZ)     # Tk after period
 
 # ------------- DANCE ORDER & SLEEPS -------------
-# Put your files in the same folder as this script.
 # Each tuple: (filename, sleep_after_sec)
 DANCE_SEQUENCE = [
-    ("dance_test.json", 5),   # sleep 10s after Dance_1
-    #("Dance_2.json", 10),   # sleep 10s after Dance_2
-    #("Dance_3.json", 10),   # sleep 10s after Dance_3
+    ("dance_test.json", 10),
+    # ("Dance_2.json", 10),
+    # ("Dance_3.json", 10),
 ]
 # ------------------------------------------------
 
@@ -39,11 +38,11 @@ root.resizable(False, False)
 basic_running = False          # /fish/start mode on Pis
 dance_running = False          # JSON streaming active
 dance_job_id = None            # Tk after() job id
-sleep_job_id = None            # sleep streamer job
 dances = []                    # loaded dances: list of dicts {frames: List[List[deg]], hz: (optional)}
 dance_idx = 0                  # which dance file in the sequence
 frame_idx = 0                  # which frame within the current dance
 sleep_until = 0.0              # absolute monotonic time to end a between-dance sleep
+cooling = False                # true only during the cooling/sleep window
 
 # ---------- Helpers ----------
 def send_all(path, arg=None):
@@ -58,7 +57,6 @@ def send_angles_frame(frame):
     frame: list-like of length NUM_FISH (deg for fish1, fish2, fish3)
     """
     if not isinstance(frame, (list, tuple)) or len(frame) < NUM_FISH:
-        # Fallback: if malformed frame, hold home
         frame = [HOME_DEG] * NUM_FISH
     for i, c in enumerate(clients):
         try:
@@ -81,15 +79,11 @@ def load_one_dance(path):
         frames = data
         hz = STREAM_HZ
 
-    # light validation / normalization
     clean = []
-    for idx, fr in enumerate(frames):
+    for fr in frames:
         if not isinstance(fr, (list, tuple)):
-            # skip malformed frames
             continue
-        # pad / slice to NUM_FISH
         row = list(fr[:NUM_FISH]) + [HOME_DEG] * max(0, NUM_FISH - len(fr))
-        # coerce to float
         try:
             row = [float(x) for x in row]
         except Exception:
@@ -117,7 +111,6 @@ def load_all_dances():
             print(f"[Loaded] {fname}: {len(d['frames'])} frames (hz={d.get('hz', STREAM_HZ)})")
         except Exception as e:
             print(f"[ERROR] Failed to load {fname}: {e}")
-            # Insert a placeholder "hold-home" dance to keep the timeline intact
             dances.append({"frames": [[HOME_DEG]*NUM_FISH]*int(STREAM_HZ*2), "hz": STREAM_HZ})
 
 # ---------- Basic Oscillation (Pis handle their own sine) ----------
@@ -136,24 +129,24 @@ def start_basic_osc():
 # ---------- Dance control ----------
 def start_dance():
     """
-    Start streaming angles from JSON files at 50Hz, with sleeps between dances,
+    Start streaming angles from JSON files at STREAM_HZ, with sleeps between dances,
     looping the DANCE_SEQUENCE until STOP is pressed.
     """
-    global dance_running, basic_running, dance_idx, frame_idx, sleep_until
+    global dance_running, basic_running, dance_idx, frame_idx, sleep_until, cooling
     if dance_running:
         status_label.config(text="Dance already running.", fg="blue")
         return
 
     if basic_running:
-        # We intentionally do NOT send /fish/stop here; angles will take over.
+        # No explicit /fish/stop; our angles will take over.
         basic_running = False
 
-    # Load dances (fresh each time so you can swap files without restarting)
     load_all_dances()
 
     dance_idx = 0
     frame_idx = 0
     sleep_until = 0.0
+    cooling = False
     dance_running = True
     status_label.config(text="💃 Dance streaming from JSON…", fg="green")
 
@@ -162,57 +155,58 @@ def start_dance():
 def _dance_tick():
     """
     Called every FRAME_MS while dance_running.
-    Streams a frame; when a dance ends, sleeps at HOME for the configured duration,
-    then advances to the next dance.
+    Streams frames; when a dance ends, sends /fish/stop ONCE and
+    **does not send any angles during sleep**; then advances to the next dance.
     """
-    global dance_job_id, sleep_job_id, dance_idx, frame_idx, sleep_until
+    global dance_job_id, dance_idx, frame_idx, sleep_until, cooling
 
     if not dance_running:
         return
 
-    # Are we in a sleep gap between dances?
+    # Handle sleep/cooling window
     if sleep_until > 0.0:
         now = time.monotonic()
         if now >= sleep_until:
             # Sleep done -> advance to next dance
             sleep_until = 0.0
+            cooling = False
             frame_idx = 0
             dance_idx = (dance_idx + 1) % len(DANCE_SEQUENCE)
-            # fall-through to play next frame this tick
+            status_label.config(text=f"🔁 Starting next dance ({dance_idx+1}/{len(DANCE_SEQUENCE)})", fg="green")
+            # fall-through to stream first frame of the next dance this tick
         else:
-            # Keep streaming HOME during sleep
-            send_angles_frame([HOME_DEG]*NUM_FISH)
+            # During cooling: DO NOT SEND ANGLES (keep torque off)
             _schedule_next_tick()
             return
 
-    # Get current dance and frame
+    # If nothing loaded, idle HOME (optional; but here we also avoid re-enabling torque)
     if not dances:
-        # Nothing loaded: hold HOME
-        send_angles_frame([HOME_DEG]*NUM_FISH)
         _schedule_next_tick()
         return
 
     current = dances[dance_idx]
     frames = current["frames"]
 
-    # Safety clamp
+    # End of current dance → stop once and start timed cooling
     if frame_idx >= len(frames):
-        # End of this dance -> start sleep
-        sleep_sec = float(DANCE_SEQUENCE[dance_idx][1])
-        sleep_until = time.monotonic() + max(0.0, sleep_sec)
-        # Immediately stream HOME on this tick
-        send_angles_frame([HOME_DEG]*NUM_FISH)
+        if not cooling:
+            cooling = True
+            sleep_sec = float(DANCE_SEQUENCE[dance_idx][1])
+            send_all("/fish/stop", None)  # torque off exactly once
+            status_label.config(text=f"😴 Cooling motors for {sleep_sec:.0f}s…", fg="blue")
+            sleep_until = time.monotonic() + max(0.0, sleep_sec)
+        # Do not send angles while cooling
         _schedule_next_tick()
         return
 
-    # Stream the current frame
+    # Stream current frame
     frame = frames[frame_idx]
     send_angles_frame(frame)
 
-    # Advance frame for next tick
+    # Advance
     frame_idx += 1
 
-    # Schedule the next tick
+    # Next tick
     _schedule_next_tick()
 
 def _schedule_next_tick():
@@ -222,9 +216,9 @@ def _schedule_next_tick():
 
 def stop_all():
     """
-    Stops dance streaming (and any pending sleep) and tells Pis to torque off.
+    Stops dance streaming and tells Pis to torque off.
     """
-    global dance_running, dance_job_id, sleep_job_id, basic_running
+    global dance_running, dance_job_id, basic_running, cooling, sleep_until
     if dance_job_id is not None:
         try:
             root.after_cancel(dance_job_id)
@@ -232,9 +226,10 @@ def stop_all():
             pass
         dance_job_id = None
 
-    # No dedicated sleep job (we stream HOME inside _dance_tick), but reset anyway
     dance_running = False
     basic_running = False
+    cooling = False
+    sleep_until = 0.0
 
     send_all("/fish/stop", None)   # firmware disables torque
     status_label.config(text="🛑 All fish stopped", fg="red")
