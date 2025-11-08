@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 import tkinter as tk
 from pythonosc.udp_client import SimpleUDPClient
-import time, json, os
+import time, json, os, threading
 
 # ------------- NETWORK CONFIG -------------
 FISH_LIST = [
@@ -8,18 +9,19 @@ FISH_LIST = [
     ("10.1.91.102", 8000),  # fish2
     ("10.1.91.103", 8000),  # fish3
 ]
-FISH_NAMES = ["fish1", "fish2", "fish3"]
 NUM_FISH = 3
 HOME_DEG = 180.0
 
 # ------------- STREAMING CONFIG -------------
-STREAM_HZ = 5.0                       # play out at 25 Hz
-FRAME_MS = int(1000.0 / STREAM_HZ)     # Tk after period
+STREAM_HZ = 10.0                     # set to the Hz your JSON was authored at
+TICK_SEC  = 1.0 / STREAM_HZ
 
 # ------------- DANCE ORDER & SLEEPS -------------
 # Each tuple: (filename, sleep_after_sec)
 DANCE_SEQUENCE = [
-    ("dance_test.json", 10),
+    ("fish_angle_dance.json", 5),
+    ("fish_pulsing_dance.json", 60),
+    #("fish_sine_dance.json", 10),
     # ("Dance_2.json", 10),
     # ("Dance_3.json", 10),
 ]
@@ -34,11 +36,17 @@ root.title("🐠 Peixe Cidade Control")
 root.geometry("380x280")
 root.resizable(False, False)
 
+# ---- UI-safe status setter (thread-safe) ----
+def ui_status(msg, color="black"):
+    root.after(0, lambda: (status_label.config(text=msg, fg=color)))
+
 # State
 basic_running = False          # /fish/start mode on Pis
-dance_running = False          # JSON streaming active
-dance_job_id = None            # Tk after() job id
-dances = []                    # loaded dances: list of dicts {frames: List[List[deg]], hz: (optional)}
+sender_thread = None
+stop_flag = threading.Event()
+
+# dance state protected by GIL (simple types)
+dances = []                    # loaded dances: list of dicts {frames: List[List[deg]], "hz": (optional)}
 dance_idx = 0                  # which dance file in the sequence
 frame_idx = 0                  # which frame within the current dance
 sleep_until = 0.0              # absolute monotonic time to end a between-dance sleep
@@ -74,10 +82,10 @@ def load_one_dance(path):
 
     if isinstance(data, dict) and "frames" in data:
         frames = data["frames"]
-        hz = float(data.get("hz", STREAM_HZ))
+        _hz = float(data.get("hz", STREAM_HZ))
     else:
         frames = data
-        hz = STREAM_HZ
+        _hz = STREAM_HZ
 
     clean = []
     for fr in frames:
@@ -93,13 +101,10 @@ def load_one_dance(path):
     if not clean:
         raise ValueError(f"No valid frames in {path}")
 
-    return {"frames": clean, "hz": hz}
+    return {"frames": clean, "hz": _hz}
 
 def load_all_dances():
-    """
-    Loads all dances listed in DANCE_SEQUENCE.
-    Stores into global 'dances'.
-    """
+    """Loads all dances listed in DANCE_SEQUENCE into global 'dances'."""
     global dances
     dances = []
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -111,32 +116,33 @@ def load_all_dances():
             print(f"[Loaded] {fname}: {len(d['frames'])} frames (hz={d.get('hz', STREAM_HZ)})")
         except Exception as e:
             print(f"[ERROR] Failed to load {fname}: {e}")
+            # placeholder "hold-home" dance
             dances.append({"frames": [[HOME_DEG]*NUM_FISH]*int(STREAM_HZ*2), "hz": STREAM_HZ})
 
 # ---------- Basic Oscillation (Pis handle their own sine) ----------
 def start_basic_osc():
     global basic_running
-    if dance_running:
-        status_label.config(text="Stop Dance first.", fg="orange")
+    if sender_thread and sender_thread.is_alive():
+        ui_status("Stop Dance first.", "orange")
         return
     if basic_running:
-        status_label.config(text="Already oscillating.", fg="blue")
+        ui_status("Already oscillating.", "blue")
         return
     send_all("/fish/start", None)   # Pis run their own oscillator
     basic_running = True
-    status_label.config(text="🐟 Basic Oscillation started", fg="green")
+    ui_status("🐟 Basic Oscillation started", "green")
 
-# ---------- Dance control ----------
+# ---------- Dance control (threaded sender) ----------
 def start_dance():
     """
-    Start streaming angles from JSON files at STREAM_HZ, with sleeps between dances,
-    looping the DANCE_SEQUENCE until STOP is pressed.
+    Start streaming angles from JSON files at STREAM_HZ in a dedicated thread,
+    with sleeps (cooling) between dances, looping the sequence until STOP.
     """
-    global dance_running, basic_running, dance_idx, frame_idx, sleep_until, cooling
-    if dance_running:
-        status_label.config(text="Dance already running.", fg="blue")
-        return
+    global sender_thread, basic_running, dance_idx, frame_idx, sleep_until, cooling
 
+    if sender_thread and sender_thread.is_alive():
+        ui_status("Dance already running.", "blue")
+        return
     if basic_running:
         # No explicit /fish/stop; our angles will take over.
         basic_running = False
@@ -147,92 +153,80 @@ def start_dance():
     frame_idx = 0
     sleep_until = 0.0
     cooling = False
-    dance_running = True
-    status_label.config(text="💃 Dance streaming from JSON…", fg="green")
+    stop_flag.clear()
 
-    _dance_tick()  # kick off
+    sender_thread = threading.Thread(target=_dance_loop, daemon=True)
+    sender_thread.start()
+    ui_status("💃 Dance streaming from JSON…", "green")
 
-def _dance_tick():
+def _dance_loop():
     """
-    Called every FRAME_MS while dance_running.
-    Streams frames; when a dance ends, sends /fish/stop ONCE and
-    **does not send any angles during sleep**; then advances to the next dance.
+    Tight-timed streaming loop (separate thread).
+    Sends frames at precise STREAM_HZ using time.monotonic().
+    Between dances: sends /fish/stop once, then sends NO angles until sleep ends.
     """
-    global dance_job_id, dance_idx, frame_idx, sleep_until, cooling
+    global dance_idx, frame_idx, sleep_until, cooling
 
-    if not dance_running:
-        return
-
-    # Handle sleep/cooling window
-    if sleep_until > 0.0:
+    next_t = time.monotonic()
+    while not stop_flag.is_set():
         now = time.monotonic()
-        if now >= sleep_until:
-            # Sleep done -> advance to next dance
-            sleep_until = 0.0
-            cooling = False
-            frame_idx = 0
-            dance_idx = (dance_idx + 1) % len(DANCE_SEQUENCE)
-            status_label.config(text=f"🔁 Starting next dance ({dance_idx+1}/{len(DANCE_SEQUENCE)})", fg="green")
-            # fall-through to stream first frame of the next dance this tick
-        else:
-            # During cooling: DO NOT SEND ANGLES (keep torque off)
-            _schedule_next_tick()
-            return
+        # pacing
+        if now < next_t:
+            time.sleep(max(0.0005, next_t - now))
+            continue
+        next_t += TICK_SEC
 
-    # If nothing loaded, idle HOME (optional; but here we also avoid re-enabling torque)
-    if not dances:
-        _schedule_next_tick()
-        return
+        # Sleep/cooling window?
+        if sleep_until > 0.0:
+            if now >= sleep_until:
+                # sleep complete → advance to next dance
+                sleep_until = 0.0
+                cooling = False
+                frame_idx = 0
+                dance_idx = (dance_idx + 1) % len(DANCE_SEQUENCE)
+                ui_status(f"🔁 Starting next dance ({dance_idx+1}/{len(DANCE_SEQUENCE)})", "green")
+                # fall-through to stream first frame this tick
+            else:
+                # During cooling: DO NOT SEND ANY ANGLES (keep torque off)
+                continue
 
-    current = dances[dance_idx]
-    frames = current["frames"]
+        if not dances:
+            # nothing loaded; idle (no angles to avoid re-enabling torque)
+            continue
 
-    # End of current dance → stop once and start timed cooling
-    if frame_idx >= len(frames):
-        if not cooling:
-            cooling = True
-            sleep_sec = float(DANCE_SEQUENCE[dance_idx][1])
-            send_all("/fish/stop", None)  # torque off exactly once
-            status_label.config(text=f"😴 Cooling motors for {sleep_sec:.0f}s…", fg="blue")
-            sleep_until = time.monotonic() + max(0.0, sleep_sec)
-        # Do not send angles while cooling
-        _schedule_next_tick()
-        return
+        current = dances[dance_idx]
+        frames = current["frames"]
 
-    # Stream current frame
-    frame = frames[frame_idx]
-    send_angles_frame(frame)
+        # End of this dance → send stop once and start timed cooling
+        if frame_idx >= len(frames):
+            if not cooling:
+                cooling = True
+                sleep_sec = float(DANCE_SEQUENCE[dance_idx][1])
+                send_all("/fish/stop", None)  # torque off exactly once
+                ui_status(f"😴 Cooling motors for {sleep_sec:.0f}s…", "blue")
+                sleep_until = time.monotonic() + max(0.0, sleep_sec)
+            # no angles during sleep
+            continue
 
-    # Advance
-    frame_idx += 1
-
-    # Next tick
-    _schedule_next_tick()
-
-def _schedule_next_tick():
-    global dance_job_id
-    if dance_running:
-        dance_job_id = root.after(FRAME_MS, _dance_tick)
+        # Stream current frame (this implicitly re-enables torque)
+        frame = frames[frame_idx]
+        send_angles_frame(frame)
+        frame_idx += 1
 
 def stop_all():
     """
     Stops dance streaming and tells Pis to torque off.
     """
-    global dance_running, dance_job_id, basic_running, cooling, sleep_until
-    if dance_job_id is not None:
+    global basic_running
+    stop_flag.set()
+    if sender_thread and sender_thread.is_alive():
         try:
-            root.after_cancel(dance_job_id)
+            sender_thread.join(timeout=1.0)
         except Exception:
             pass
-        dance_job_id = None
-
-    dance_running = False
     basic_running = False
-    cooling = False
-    sleep_until = 0.0
-
     send_all("/fish/stop", None)   # firmware disables torque
-    status_label.config(text="🛑 All fish stopped", fg="red")
+    ui_status("🛑 All fish stopped", "red")
 
 def on_close():
     try:
