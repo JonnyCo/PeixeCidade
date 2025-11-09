@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import time
 import math
 import tkinter as tk
@@ -5,117 +6,118 @@ import threading
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 import python
 
-# Constants
-PORT = "/dev/ttyUSB0"  # Update if needed
-BAUDRATE = 57600
-ADDR_GOAL_POSITION = 116
-ADDR_PRESENT_POSITION = 132
-ADDR_MOVING_SPEED = 112
+# ==================== USER SETTINGS ====================
+PORT                 = "/dev/tty.usbserial-FTA7NN86"
+MOTOR_ID             = 1
+BAUDRATE             = 57600
+PROTOCOL_VERSION     = 2.0
+
+HOME_DEGREES         = 180.0     # mechanical center
+AMPLITUDE_DEG        = 50.0      # swing amplitude around HOME (degrees)
+
+# Control the motion in **engineering units**
+MIN_SPEED_DPS        = 100.0      # deg/sec at slow end of sweep
+MAX_SPEED_DPS        = 100.0      # deg/sec at fast end of sweep
+PERIOD_SEC           = 15.0     # seconds for MIN→MAX→MIN speed sweep
+
+LOOP_HZ              = 50.0     # control loop frequency (Hz)
+
+SLEEP_AFTER_PERIOD_SEC = 5.0     # pause after each full sweep
+SLEEP_AT_CENTER        = True
+
+DISABLE_TORQUE_DURING_SLEEP = True
+# =======================================================
+
+# Dynamixel Control Table (Protocol 2.0)
 ADDR_TORQUE_ENABLE = 64
-TORQUE_ENABLE = 1
-TORQUE_DISABLE = 0
-PROTOCOL_VERSION = 2.0
-MOTOR_ID = 1
-HOME_DEGREES = 180
+ADDR_GOAL_POSITION = 116
+TORQUE_ENABLE      = 1
+TORQUE_DISABLE     = 0
 
-def degrees_to_dxl_units(degrees):
-    return int((degrees / 360.0) * 4095)
+def degrees_to_dxl_units(deg: float) -> int:
+    deg = (deg % 360.0)
+    return int(deg / 360.0 * 4095)
 
-def dxl_units_to_degrees(units):
-    return (units / 4095.0) * 360
+def clamp_0_4095(x: int) -> int:
+    return 0 if x < 0 else (4095 if x > 4095 else x)
 
-class SingleMotorOscillator:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Single Motor Oscillator")
+def speed_deg_per_sec(elapsed: float) -> float:
+    if PERIOD_SEC <= 0.0:
+        return MIN_SPEED_DPS
+    phi = 2.0 * math.pi * (elapsed / PERIOD_SEC)
+    return MIN_SPEED_DPS + (MAX_SPEED_DPS - MIN_SPEED_DPS) * 0.5 * (1.0 - math.cos(phi))
 
-        self.port_handler = PortHandler(PORT)
-        self.packet_handler = PacketHandler(PROTOCOL_VERSION)
+def main():
+    loop_dt = 1.0 / max(LOOP_HZ, 1.0)
+    amp_deg = max(AMPLITUDE_DEG, 0.1)
 
-        if not self.port_handler.openPort() or not self.port_handler.setBaudRate(BAUDRATE):
-            raise Exception("Failed to open port or set baudrate!")
+    ph = PortHandler(PORT)
+    pk = PacketHandler(PROTOCOL_VERSION)
+    if not ph.openPort():
+        raise RuntimeError(f"Failed to open port {PORT}")
+    if not ph.setBaudRate(BAUDRATE):
+        raise RuntimeError(f"Failed to set baudrate {BAUDRATE}")
 
-        # Enable motor and set home position
-        self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
-        self.zero_pos = degrees_to_dxl_units(HOME_DEGREES)
-        self.running = False
+    pk.write1ByteTxRx(ph, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+    center_units = degrees_to_dxl_units(HOME_DEGREES)
 
-        # UI
-        tk.Label(root, text="Amplitude (degrees):").pack()
-        self.amplitude_entry = tk.Entry(root)
-        self.amplitude_entry.insert(0, "30")
-        self.amplitude_entry.pack()
+    pk.write4ByteTxRx(ph, MOTOR_ID, ADDR_GOAL_POSITION, center_units)
+    time.sleep(0.3)
 
-        tk.Label(root, text="Speed (steps/sec):").pack()
-        self.speed_entry = tk.Entry(root)
-        self.speed_entry.insert(0, "5")
-        self.speed_entry.pack()
+    print("Running continuous sinusoid (Ctrl+C to stop).")
 
-        self.start_button = tk.Button(root, text="Start Oscillation", command=self.start_oscillation)
-        self.start_button.pack(pady=5)
-
-        self.stop_button = tk.Button(root, text="Stop Oscillation", command=self.stop_oscillation)
-        self.stop_button.pack(pady=5)
-
-        self.log = tk.Text(root, height=8, width=40)
-        self.log.pack(pady=10)
-
-    def move_to_position(self, position):
-        self.packet_handler.write4ByteTxRx(self.port_handler, MOTOR_ID, ADDR_GOAL_POSITION, position)
-
-    def set_speed(self, speed):
-        self.packet_handler.write2ByteTxRx(self.port_handler, MOTOR_ID, ADDR_MOVING_SPEED, speed)
-
-    def start_oscillation(self):
-        try:
-            amplitude_deg = float(self.amplitude_entry.get())
-            speed = int(self.speed_entry.get())
-        except ValueError:
-            self.log.insert(tk.END, "Invalid amplitude or speed.\n")
-            return
-
-        if amplitude_deg <= 0 or speed <= 0:
-            self.log.insert(tk.END, "Amplitude and speed must be positive.\n")
-            return
-
-        amplitude_units = degrees_to_dxl_units(amplitude_deg)
-        self.set_speed(speed)
-        self.running = True
-
-        def oscillate():
-            steps = 20
-            while self.running:
-                for direction in [1, -1]:
-                    for i in range(steps + 1):
-                        if not self.running:
-                            return
-                        sine_value = math.sin((i / steps) * math.pi)
-                        position = int(self.zero_pos + direction * amplitude_units * sine_value)
-                        self.move_to_position(position)
-                        time.sleep(1 / (speed * 10))
-
-        threading.Thread(target=oscillate, daemon=True).start()
-        self.log.insert(tk.END, "Oscillation started.\n")
-
-    def stop_oscillation(self):
-        self.running = False
-        self.move_to_position(self.zero_pos)
-        self.log.insert(tk.END, "Oscillation stopped.\n")
-
-    def cleanup(self):
-        self.running = False
-        self.packet_handler.write1ByteTxRx(self.port_handler, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
-        self.port_handler.closePort()
-        print("Cleanup complete.")
-
-# Run the application
-if __name__ == "__main__":
     try:
-        root = tk.Tk()
-        app = SingleMotorOscillator(root)
-        root.mainloop()
-    except Exception as e:
-        print(f"Error: {e}")
+        while True:
+            period_start = time.monotonic()
+            phase = 0.0
+
+            while True:
+                now = time.monotonic()
+                elapsed = now - period_start
+                if elapsed >= PERIOD_SEC:
+                    break
+
+                v_dps = speed_deg_per_sec(elapsed)
+                dphase_dt = v_dps / amp_deg  # rad/s
+
+                phase += dphase_dt * loop_dt
+
+                theta_deg = HOME_DEGREES + AMPLITUDE_DEG * math.sin(phase)
+                goal_units = clamp_0_4095(degrees_to_dxl_units(theta_deg))
+                pk.write4ByteTxRx(ph, MOTOR_ID, ADDR_GOAL_POSITION, goal_units)
+
+                after = time.monotonic()
+                sleep_remain = loop_dt - (after - now)
+                if sleep_remain > 0:
+                    time.sleep(sleep_remain)
+
+            # ---- END OF SWEEP ----
+            if SLEEP_AFTER_PERIOD_SEC > 0.0:
+                if SLEEP_AT_CENTER:
+                    pk.write4ByteTxRx(ph, MOTOR_ID, ADDR_GOAL_POSITION, center_units)
+                    time.sleep(0.3)
+
+                if DISABLE_TORQUE_DURING_SLEEP:
+                    pk.write1ByteTxRx(ph, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+
+                print(f"Sleeping {SLEEP_AFTER_PERIOD_SEC:.1f} sec…")
+                time.sleep(SLEEP_AFTER_PERIOD_SEC)
+
+                if DISABLE_TORQUE_DURING_SLEEP:
+                    pk.write1ByteTxRx(ph, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
+                    if SLEEP_AT_CENTER:
+                        pk.write4ByteTxRx(ph, MOTOR_ID, ADDR_GOAL_POSITION, center_units)
+                        time.sleep(0.2)
+
+    except KeyboardInterrupt:
+        print("\nStopping...")
+
     finally:
-        if 'app' in locals():
-            app.cleanup()
+        pk.write4ByteTxRx(ph, MOTOR_ID, ADDR_GOAL_POSITION, center_units)
+        time.sleep(0.2)
+        pk.write1ByteTxRx(ph, MOTOR_ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+        ph.closePort()
+        print("Done.")
+
+if __name__ == "__main__":
+    main()
