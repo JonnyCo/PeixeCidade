@@ -3,6 +3,7 @@ import math
 import tkinter as tk
 import threading
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
+import python
 
 # Constants
 PORT = "/dev/ttyUSB0"  # Update if needed
