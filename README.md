@@ -10,11 +10,12 @@ Miriti: An expression of the Amazonian imaginary, this ancestral material is bor
 
 Electromechanical System: Reinterprets the pirarucu's movement through a choreography of tension and elasticity. Robotic motors act as muscles, pulling thread tendons and elastic bands that balance force and rest, as in living matter.
 
-See the show: Fórum Landi, R. Siqueira Mendes, 60 - Cidade Velha, Belém - PA, 66020-130, Brazil
+**See the show:** Fórum Landi, R. Siqueira Mendes, 60 - Cidade Velha, Belém - PA, 66020-130, Brazil
 
 **To do Documentation:**
 OSC Interface
 Mechanism Details
+
 
 
 
