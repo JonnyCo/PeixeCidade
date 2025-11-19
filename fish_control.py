@@ -20,7 +20,7 @@ TICK_SEC  = 1.0 / STREAM_HZ
 # Each tuple: (filename, sleep_after_sec)
 DANCE_SEQUENCE = [
     ("fish_angle_dance.json", 5),
-    ("fish_pulsing_dance.json", 60),
+    ("fish_pulsing_dance.json", 25),
     #("fish_sine_dance.json", 10),
     # ("Dance_2.json", 10),
     # ("Dance_3.json", 10),
